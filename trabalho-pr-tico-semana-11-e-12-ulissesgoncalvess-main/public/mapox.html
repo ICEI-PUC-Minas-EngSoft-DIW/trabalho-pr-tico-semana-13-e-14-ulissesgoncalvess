@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Mapbox - Visualização Dinâmica</title>
+
+  <!-- Mapbox GL JS -->
+  <link href="https://api.mapbox.com/mapbox-gl-js/v2.20.0/mapbox-gl.css" rel="stylesheet" />
+  <script src="https://api.mapbox.com/mapbox-gl-js/v2.20.0/mapbox-gl.js"></script>
+
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <h1>Mapa Interativo (Mapbox)</h1>
+    <p>Dados carregados do JSON Server (<code>db.json</code>) - rota <code>/places</code>.</p>
+  </header>
+
+  <main>
+    <div id="map"></div>
+    <aside id="sidebar">
+      <h2>Locais</h2>
+      <ul id="placesList"></ul>
+      <div class="controls">
+        <label for="clusterToggle"><input type="checkbox" id="clusterToggle" checked> Agregar marcadores (cluster)</label>
+      </div>
+    </aside>
+  </main>
+
+  <script>
+    // === CONFIGURE AQUI SEU TOKEN MAPBOX ===
+    // Substitua 'YOUR_MAPBOX_TOKEN' pelo seu token de acesso do Mapbox.
+    // Você pode inserir o token direto aqui ou configurar via variável de ambiente/local.
+    const MAPBOX_TOKEN = 'YOUR_MAPBOX_TOKEN';
+
+    if (!MAPBOX_TOKEN || MAPBOX_TOKEN === 'YOUR_MAPBOX_TOKEN') {
+      alert('Por favor defina o MAPBOX_TOKEN no arquivo index.html (substitua YOUR_MAPBOX_TOKEN).');
+    }
+
+    mapboxgl.accessToken = MAPBOX_TOKEN;
+
+    const map = new mapboxgl.Map({
+      container: 'map',
+      style: 'mapbox://styles/mapbox/streets-v12',
+      center: [-47.8825, -15.7942],
+      zoom: 4
+    });
+
+    // carregar dados do JSON Server
+    async function fetchPlaces() {
+      try {
+        const res = await fetch('http://localhost:3000/places');
+        if (!res.ok) throw new Error('Erro ao buscar /places - verifique se o JSON Server está rodando em http://localhost:3000');
+        const data = await res.json();
+        return data;
+      } catch (err) {
+        console.error(err);
+        return [];
+      }
+    }
+
+    // converter para GeoJSON
+    function toGeoJSON(places) {
+      return {
+        type: 'FeatureCollection',
+        features: places.map(p => ({
+          type: 'Feature',
+          properties: {
+            id: p.id,
+            name: p.name,
+            description: p.description,
+            city: p.city
+          },
+          geometry: {
+            type: 'Point',
+            coordinates: [p.lng, p.lat]
+          }
+        }))
+      };
+    }
+
+    // monta lista lateral
+    function renderList(places) {
+      const ul = document.getElementById('placesList');
+      ul.innerHTML = '';
+      places.forEach(p => {
+        const li = document.createElement('li');
+        li.textContent = p.name + ' — ' + (p.city || '');
+        li.onclick = () => {
+          map.flyTo({ center: [p.lng, p.lat], zoom: 12 });
+        };
+        ul.appendChild(li);
+      });
+    }
+
+    let sourceAdded = false;
+    let clusterEnabled = true;
+
+    async function mountMap() {
+      const places = await fetchPlaces();
+      renderList(places);
+      const geojson = toGeoJSON(places);
+
+      map.on('load', () => {
+        if (map.getSource('places')) {
+          map.removeLayer('clusters');
+          map.removeLayer('cluster-count');
+          map.removeLayer('unclustered-point');
+          map.removeSource('places');
+        }
+
+        map.addSource('places', {
+          type: 'geojson',
+          data: geojson,
+          cluster: clusterEnabled,
+          clusterMaxZoom: 14,
+          clusterRadius: 50
+        });
+
+        // cluster circles
+        map.addLayer({
+          id: 'clusters',
+          type: 'circle',
+          source: 'places',
+          filter: ['has', 'point_count'],
+          paint: {
+            'circle-color': ['step', ['get', 'point_count'], '#51bbd6', 5, '#f1f075', 10, '#f28cb1'],
+            'circle-radius': ['step', ['get', 'point_count'], 15, 5, 20, 10, 25]
+          }
+        });
+
+        map.addLayer({
+          id: 'cluster-count',
+          type: 'symbol',
+          source: 'places',
+          filter: ['has', 'point_count'],
+          layout: {
+            'text-field': '{point_count_abbreviated}',
+            'text-font': ['DIN Offc Pro Medium', 'Arial Unicode MS Bold'],
+            'text-size': 12
+          }
+        });
+
+        // unclustered points
+        map.addLayer({
+          id: 'unclustered-point',
+          type: 'circle',
+          source: 'places',
+          filter: ['!', ['has', 'point_count']],
+          paint: {
+            'circle-color': '#11b4da',
+            'circle-radius': 8,
+            'circle-stroke-width': 2,
+            'circle-stroke-color': '#fff'
+          }
+        });
+
+        // popups on click
+        map.on('click', 'unclustered-point', (e) => {
+          const features = map.queryRenderedFeatures(e.point, { layers: ['unclustered-point'] });
+          if (!features.length) return;
+          const feat = features[0];
+          const coords = feat.geometry.coordinates.slice();
+          const props = feat.properties;
+
+          const html = `<strong>${props.name || 'Sem nome'}</strong><p>${props.description || ''}</p><p><em>${props.city || ''}</em></p>`;
+          new mapboxgl.Popup().setLngLat(coords).setHTML(html).addTo(map);
+        });
+
+        // zoom on cluster click
+        map.on('click', 'clusters', (e) => {
+          const features = map.queryRenderedFeatures(e.point, { layers: ['clusters'] });
+          const clusterId = features[0].properties.cluster_id;
+          map.getSource('places').getClusterExpansionZoom(clusterId, (err, zoom) => {
+            if (err) return;
+            map.easeTo({ center: features[0].geometry.coordinates, zoom: zoom });
+          });
+        });
+
+        map.on('mouseenter', 'clusters', () => map.getCanvas().style.cursor = 'pointer');
+        map.on('mouseleave', 'clusters', () => map.getCanvas().style.cursor = '');
+
+      });
+    }
+
+    document.getElementById('clusterToggle').addEventListener('change', async (e) => {
+      clusterEnabled = e.target.checked;
+      // rebuild source/layers
+      mountMap();
+    });
+
+    mountMap();
+  </script>
+</body>
+</html>
